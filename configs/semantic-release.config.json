@@ -1,0 +1,71 @@
+{
+  "branches": [
+    "+([0-9])?(.{+([0-9]),x}).x",
+    "main",
+    "master",
+    {
+      "name": "develop",
+      "prerelease": "beta"
+    },
+    {
+      "name": "beta",
+      "prerelease": true
+    },
+    {
+      "name": "alpha",
+      "prerelease": true
+    }
+  ],
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    [
+      "@semantic-release/changelog",
+      {
+        "changelogFile": "CHANGELOG.md"
+      }
+    ],
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "echo 'Version: ${nextRelease.version}' > version.txt && echo 'Release Notes: ${nextRelease.notes}' >> version.txt"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "assets": [
+          {
+            "path": "version.txt",
+            "label": "Version and Release Notes"
+          }
+        ]
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": ["CHANGELOG.md", "version.txt"],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      }
+    ]
+  ],
+  "preset": "conventionalcommits",
+  "releaseRules": [
+    {"type": "feat", "release": "minor"},
+    {"type": "fix", "release": "patch"},
+    {"type": "perf", "release": "patch"},
+    {"type": "revert", "release": "patch"},
+    {"type": "docs", "scope": "README", "release": "patch"},
+    {"type": "refactor", "release": "patch"},
+    {"type": "style", "release": false},
+    {"type": "test", "release": false},
+    {"type": "chore", "release": false},
+    {"type": "build", "release": "patch"},
+    {"type": "ci", "release": false},
+    {"breaking": true, "release": "major"}
+  ],
+  "parserOpts": {
+    "noteKeywords": ["BREAKING CHANGE", "BREAKING CHANGES", "BREAKING"]
+  }
+}

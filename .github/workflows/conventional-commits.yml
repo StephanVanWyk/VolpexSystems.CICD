@@ -1,0 +1,193 @@
+name: Conventional Commits Validation
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: 'Path to commitlint configuration'
+        required: false
+        default: '.github/commitlint.config.js'
+        type: string
+      check-pr-title:
+        description: 'Validate PR title against conventional commits'
+        required: false
+        default: true
+        type: boolean
+      check-all-commits:
+        description: 'Validate all commits in PR'
+        required: false
+        default: true
+        type: boolean
+      fail-on-error:
+        description: 'Fail the workflow if validation errors are found'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  validate-commits:
+    name: Validate Conventional Commits
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install commitlint
+      run: |
+        npm install -g @commitlint/cli
+        npm install -g @commitlint/config-conventional
+
+    - name: Create default commitlint config
+      if: ${{ !fileExists(inputs.config-path) }}
+      run: |
+        mkdir -p $(dirname "${{ inputs.config-path }}")
+        cat > "${{ inputs.config-path }}" << 'EOF'
+        module.exports = {
+          extends: ['@commitlint/config-conventional'],
+          rules: {
+            'type-enum': [
+              2,
+              'always',
+              [
+                'feat',     // A new feature
+                'fix',      // A bug fix
+                'docs',     // Documentation only changes
+                'style',    // Formatting, missing semi colons, etc; no code change
+                'refactor', // Refactoring production code
+                'test',     // Adding tests, refactoring test; no production code change
+                'chore',    // Updating build tasks, package manager configs, etc
+                'perf',     // Performance improvements
+                'build',    // Changes to build system or external dependencies
+                'ci',       // Changes to CI configuration files and scripts
+                'revert',   // Reverts a previous commit
+                'release'   // Release commits
+              ]
+            ],
+            'scope-enum': [
+              2,
+              'always',
+              [
+                'api',
+                'ui',
+                'core',
+                'auth',
+                'db',
+                'config',
+                'deps',
+                'ci',
+                'docs',
+                'test',
+                'security',
+                'performance'
+              ]
+            ],
+            'subject-case': [2, 'always', 'lower-case'],
+            'subject-empty': [2, 'never'],
+            'subject-full-stop': [2, 'never', '.'],
+            'header-max-length': [2, 'always', 100],
+            'body-max-line-length': [2, 'always', 120]
+          }
+        };
+        EOF
+
+    - name: Validate PR title
+      if: ${{ inputs.check-pr-title && github.event_name == 'pull_request' }}
+      run: |
+        echo "${{ github.event.pull_request.title }}" | npx commitlint --config ${{ inputs.config-path }}
+
+    - name: Validate all commits in PR
+      if: ${{ inputs.check-all-commits && github.event_name == 'pull_request' }}
+      run: |
+        # Get the base and head commits for the PR
+        BASE_SHA="${{ github.event.pull_request.base.sha }}"
+        HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+
+        echo "Validating commits from $BASE_SHA to $HEAD_SHA"
+
+        # Get all commit messages in the PR
+        git log --format="%s" "$BASE_SHA..$HEAD_SHA" | while read -r commit_msg; do
+          echo "Validating: $commit_msg"
+          echo "$commit_msg" | npx commitlint --config ${{ inputs.config-path }}
+        done
+
+    - name: Validate single commit
+      if: ${{ github.event_name == 'push' }}
+      run: |
+        # For push events, validate the latest commit
+        git log -1 --format="%s" | npx commitlint --config ${{ inputs.config-path }}
+
+    - name: Generate validation report
+      if: always()
+      run: |
+        echo "## 📝 Conventional Commits Validation Report" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        if [[ "${{ job.status }}" == "success" ]]; then
+          echo "✅ **All commits follow conventional commit standards**" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Commit validation failed**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Common Issues:" >> $GITHUB_STEP_SUMMARY
+          echo "- Missing or invalid commit type (feat, fix, docs, etc.)" >> $GITHUB_STEP_SUMMARY
+          echo "- Subject line doesn't start with lowercase" >> $GITHUB_STEP_SUMMARY
+          echo "- Subject line ends with a period" >> $GITHUB_STEP_SUMMARY
+          echo "- Header exceeds 100 characters" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Valid Format:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo 'type(scope): description' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo 'Examples:' >> $GITHUB_STEP_SUMMARY
+          echo 'feat(api): add user authentication endpoint' >> $GITHUB_STEP_SUMMARY
+          echo 'fix(ui): resolve button alignment issue' >> $GITHUB_STEP_SUMMARY
+          echo 'docs(readme): update installation instructions' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        fi
+
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- Config file: \`${{ inputs.config-path }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "- PR title validation: ${{ inputs.check-pr-title }}" >> $GITHUB_STEP_SUMMARY
+        echo "- All commits validation: ${{ inputs.check-all-commits }}" >> $GITHUB_STEP_SUMMARY
+
+  commitlint-pr-title:
+    name: Lint PR Title
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
+
+    steps:
+    - name: Validate PR title
+      uses: amannn/action-semantic-pull-request@v5
+      with:
+        types: |
+          feat
+          fix
+          docs
+          style
+          refactor
+          test
+          chore
+          perf
+          build
+          ci
+          revert
+          release
+        requireScope: false
+        subjectPattern: ^[a-z].*[^.]$
+        subjectPatternError: |
+          The subject "{subject}" found in the pull request title "{title}"
+          didn't match the configured pattern. Please ensure that the subject
+          starts with a lowercase character and doesn't end with a period.
+        wip: true
+        validateSingleCommit: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

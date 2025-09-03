@@ -1,0 +1,142 @@
+name: .NET Build & Test
+
+on:
+  workflow_call:
+    inputs:
+      dotnet-version:
+        description: '.NET version to use'
+        required: false
+        default: '8.0.x'
+        type: string
+      solution-path:
+        description: 'Path to solution file'
+        required: false
+        default: '**/*.sln'
+        type: string
+      configuration:
+        description: 'Build configuration'
+        required: false
+        default: 'Release'
+        type: string
+      run-tests:
+        description: 'Run unit tests'
+        required: false
+        default: true
+        type: boolean
+      code-coverage:
+        description: 'Collect code coverage'
+        required: false
+        default: true
+        type: boolean
+      sonar-enabled:
+        description: 'Enable SonarQube analysis'
+        required: false
+        default: false
+        type: boolean
+      working-directory:
+        description: 'Working directory for the build'
+        required: false
+        default: '.'
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        description: 'SonarQube token'
+        required: false
+      NUGET_API_KEY:
+        description: 'NuGet API key for private feeds'
+        required: false
+
+jobs:
+  build-and-test:
+    name: Build & Test (.NET ${{ inputs.dotnet-version }})
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Required for SonarQube
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.props') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+
+    - name: Restore dependencies
+      run: dotnet restore ${{ inputs.solution-path }}
+      working-directory: ${{ inputs.working-directory }}
+
+    - name: Build solution
+      run: dotnet build ${{ inputs.solution-path }} --configuration ${{ inputs.configuration }} --no-restore
+      working-directory: ${{ inputs.working-directory }}
+
+    - name: Run unit tests
+      if: ${{ inputs.run-tests }}
+      run: |
+        dotnet test ${{ inputs.solution-path }} \
+          --configuration ${{ inputs.configuration }} \
+          --no-build \
+          --verbosity normal \
+          --logger trx \
+          --results-directory TestResults \
+          ${{ inputs.code-coverage && '--collect:"XPlat Code Coverage"' || '' }}
+      working-directory: ${{ inputs.working-directory }}
+
+    - name: Upload test results
+      if: ${{ inputs.run-tests && always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ inputs.dotnet-version }}
+        path: ${{ inputs.working-directory }}/TestResults
+        retention-days: 30
+
+    - name: Generate code coverage report
+      if: ${{ inputs.code-coverage && inputs.run-tests }}
+      run: |
+        dotnet tool install -g dotnet-reportgenerator-globaltool
+        reportgenerator \
+          -reports:TestResults/*/coverage.cobertura.xml \
+          -targetdir:TestResults/CoverageReport \
+          -reporttypes:Html;Cobertura
+      working-directory: ${{ inputs.working-directory }}
+
+    - name: Upload coverage reports
+      if: ${{ inputs.code-coverage && inputs.run-tests }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report-${{ inputs.dotnet-version }}
+        path: ${{ inputs.working-directory }}/TestResults/CoverageReport
+        retention-days: 30
+
+    - name: SonarQube analysis
+      if: ${{ inputs.sonar-enabled && secrets.SONAR_TOKEN }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        dotnet tool install --global dotnet-sonarscanner
+        dotnet sonarscanner begin \
+          /k:"${{ github.repository }}" \
+          /o:"volpexsystems" \
+          /d:sonar.login="${{ secrets.SONAR_TOKEN }}" \
+          /d:sonar.host.url="https://sonarcloud.io" \
+          /d:sonar.cs.opencover.reportsPaths=TestResults/*/coverage.opencover.xml
+        dotnet build ${{ inputs.solution-path }} --configuration ${{ inputs.configuration }}
+        dotnet sonarscanner end /d:sonar.login="${{ secrets.SONAR_TOKEN }}"
+      working-directory: ${{ inputs.working-directory }}
+
+    - name: Security scan
+      uses: securecodewarrior/github-action-add-sarif@v1
+      if: always()
+      with:
+        sarif-file: 'security-scan-results.sarif'
+        token: ${{ secrets.GITHUB_TOKEN }}
+      continue-on-error: true

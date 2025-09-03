@@ -1,0 +1,318 @@
+name: NuGet Package Publishing
+
+on:
+  workflow_call:
+    inputs:
+      package-path:
+        description: 'Path to packages to publish (glob pattern)'
+        required: false
+        default: 'src/**/*.csproj'
+        type: string
+      nuget-source:
+        description: 'NuGet source URL'
+        required: false
+        default: 'https://api.nuget.org/v3/index.json'
+        type: string
+      github-packages:
+        description: 'Also publish to GitHub Packages'
+        required: false
+        default: true
+        type: boolean
+      include-symbols:
+        description: 'Include symbol packages'
+        required: false
+        default: true
+        type: boolean
+      include-source:
+        description: 'Include source in packages'
+        required: false
+        default: false
+        type: boolean
+      configuration:
+        description: 'Build configuration'
+        required: false
+        default: 'Release'
+        type: string
+      version:
+        description: 'Package version (if not specified, uses project version)'
+        required: false
+        default: ''
+        type: string
+      pre-release:
+        description: 'Mark as pre-release'
+        required: false
+        default: false
+        type: boolean
+      dry-run:
+        description: 'Perform validation without publishing'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      NUGET_API_KEY:
+        description: 'NuGet.org API key'
+        required: true
+      GITHUB_TOKEN:
+        description: 'GitHub token for publishing to GitHub Packages'
+        required: false
+    outputs:
+      packages-published:
+        description: 'Number of packages published'
+        value: ${{ jobs.publish.outputs.packages-published }}
+      package-versions:
+        description: 'JSON array of published package versions'
+        value: ${{ jobs.publish.outputs.package-versions }}
+
+jobs:
+  validate:
+    name: Validate Packages
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.find-packages.outputs.packages }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Find packages
+      id: find-packages
+      run: |
+        echo "Finding packages matching pattern: ${{ inputs.package-path }}"
+
+        # Find all matching project files
+        packages=$(find . -path "${{ inputs.package-path }}" -type f | jq -R -s -c 'split("\n")[:-1]')
+        echo "packages=$packages" >> $GITHUB_OUTPUT
+
+        echo "Found packages:"
+        echo "$packages" | jq -r '.[]'
+
+    - name: Validate package metadata
+      run: |
+        echo "${{ steps.find-packages.outputs.packages }}" | jq -r '.[]' | while read -r package; do
+          echo "Validating: $package"
+
+          # Check for required metadata
+          if ! grep -q "<PackageId>" "$package"; then
+            echo "WARNING: $package is missing PackageId"
+          fi
+
+          if ! grep -q "<Description>" "$package"; then
+            echo "WARNING: $package is missing Description"
+          fi
+
+          if ! grep -q "<Authors>" "$package"; then
+            echo "WARNING: $package is missing Authors"
+          fi
+
+          # Check if package is packable
+          if grep -q "<IsPackable>false</IsPackable>" "$package"; then
+            echo "SKIP: $package is marked as non-packable"
+            continue
+          fi
+
+          echo "✅ $package validation complete"
+        done
+
+  publish:
+    name: Publish Packages
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ !inputs.dry-run }}
+    outputs:
+      packages-published: ${{ steps.publish-summary.outputs.count }}
+      package-versions: ${{ steps.publish-summary.outputs.versions }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build packages
+      run: |
+        echo "${{ needs.validate.outputs.packages }}" | jq -r '.[]' | while read -r package; do
+          echo "Building package: $package"
+
+          # Skip non-packable projects
+          if grep -q "<IsPackable>false</IsPackable>" "$package"; then
+            echo "Skipping non-packable project: $package"
+            continue
+          fi
+
+          # Build arguments
+          build_args="--configuration ${{ inputs.configuration }} --no-restore"
+
+          if [[ -n "${{ inputs.version }}" ]]; then
+            build_args="$build_args -p:Version=${{ inputs.version }}"
+          fi
+
+          if [[ "${{ inputs.include-symbols }}" == "true" ]]; then
+            build_args="$build_args -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg"
+          fi
+
+          if [[ "${{ inputs.include-source }}" == "true" ]]; then
+            build_args="$build_args -p:IncludeSource=true"
+          fi
+
+          # Build the package
+          dotnet pack "$package" $build_args --output ./packages
+        done
+
+    - name: List generated packages
+      run: |
+        echo "Generated packages:"
+        ls -la ./packages/
+
+    - name: Publish to NuGet.org
+      if: ${{ secrets.NUGET_API_KEY }}
+      run: |
+        for package in ./packages/*.nupkg; do
+          if [[ "$package" != *".symbols."* ]]; then
+            echo "Publishing to NuGet.org: $package"
+            dotnet nuget push "$package" \
+              --api-key ${{ secrets.NUGET_API_KEY }} \
+              --source ${{ inputs.nuget-source }} \
+              --skip-duplicate
+          fi
+        done
+
+    - name: Publish symbols to NuGet.org
+      if: ${{ secrets.NUGET_API_KEY && inputs.include-symbols }}
+      run: |
+        for package in ./packages/*.snupkg; do
+          echo "Publishing symbols to NuGet.org: $package"
+          dotnet nuget push "$package" \
+            --api-key ${{ secrets.NUGET_API_KEY }} \
+            --source ${{ inputs.nuget-source }} \
+            --skip-duplicate
+        done
+
+    - name: Publish to GitHub Packages
+      if: ${{ inputs.github-packages && secrets.GITHUB_TOKEN }}
+      run: |
+        # Configure GitHub Packages source
+        dotnet nuget add source \
+          --username ${{ github.actor }} \
+          --password ${{ secrets.GITHUB_TOKEN }} \
+          --store-password-in-clear-text \
+          --name github \
+          "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+
+        for package in ./packages/*.nupkg; do
+          if [[ "$package" != *".symbols."* ]]; then
+            echo "Publishing to GitHub Packages: $package"
+            dotnet nuget push "$package" \
+              --source github \
+              --skip-duplicate
+          fi
+        done
+
+    - name: Create publish summary
+      id: publish-summary
+      run: |
+        published_count=$(ls ./packages/*.nupkg 2>/dev/null | grep -v ".symbols." | wc -l || echo 0)
+        echo "count=$published_count" >> $GITHUB_OUTPUT
+
+        # Create JSON array of package info
+        package_info="[]"
+        for package in ./packages/*.nupkg; do
+          if [[ "$package" != *".symbols."* ]]; then
+            package_name=$(basename "$package" .nupkg)
+            package_info=$(echo "$package_info" | jq --arg name "$package_name" '. += [$name]')
+          fi
+        done
+        echo "versions=$package_info" >> $GITHUB_OUTPUT
+
+        echo "## 📦 Package Publishing Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Packages Published:** $published_count" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        if [[ $published_count -gt 0 ]]; then
+          echo "### Published Packages" >> $GITHUB_STEP_SUMMARY
+          for package in ./packages/*.nupkg; do
+            if [[ "$package" != *".symbols."* ]]; then
+              package_name=$(basename "$package" .nupkg)
+              echo "- 📦 \`$package_name\`" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Targets" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ NuGet.org: ${{ inputs.nuget-source }}" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ inputs.github-packages }}" == "true" ]]; then
+            echo "- ✅ GitHub Packages: https://nuget.pkg.github.com/${{ github.repository_owner }}" >> $GITHUB_STEP_SUMMARY
+          fi
+        else
+          echo "ℹ️ No packages were published." >> $GITHUB_STEP_SUMMARY
+        fi
+
+  dry-run:
+    name: Validate Packages (Dry Run)
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ inputs.dry-run }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Dry run package build
+      run: |
+        echo "${{ needs.validate.outputs.packages }}" | jq -r '.[]' | while read -r package; do
+          echo "Dry run build for: $package"
+
+          # Skip non-packable projects
+          if grep -q "<IsPackable>false</IsPackable>" "$package"; then
+            echo "Skipping non-packable project: $package"
+            continue
+          fi
+
+          # Build arguments
+          build_args="--configuration ${{ inputs.configuration }} --no-restore"
+
+          if [[ -n "${{ inputs.version }}" ]]; then
+            build_args="$build_args -p:Version=${{ inputs.version }}"
+          fi
+
+          # Dry run build
+          dotnet pack "$package" $build_args --output ./dry-run-packages
+        done
+
+    - name: Dry run summary
+      run: |
+        echo "## 🧪 Package Publishing Dry Run" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Mode:** Validation only (no publishing)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        package_count=$(ls ./dry-run-packages/*.nupkg 2>/dev/null | wc -l || echo 0)
+        echo "**Packages that would be published:** $package_count" >> $GITHUB_STEP_SUMMARY
+
+        if [[ $package_count -gt 0 ]]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Packages Ready for Publishing" >> $GITHUB_STEP_SUMMARY
+          for package in ./dry-run-packages/*.nupkg; do
+            package_name=$(basename "$package" .nupkg)
+            echo "- 📦 \`$package_name\`" >> $GITHUB_STEP_SUMMARY
+          done
+        fi

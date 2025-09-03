@@ -1,0 +1,62 @@
+# 🎯 Git Commit Message Template
+# Use this template as a guide for writing conventional commit messages
+#
+# Format: <type>[optional scope]: <description>
+# [optional body]
+# [optional footer(s)]
+#
+# Examples:
+# feat(results): add ApplicationResult<T> generic support
+ fix(errors): resolve null reference in ApplicationError.Context
+# docs(readme): update installation instructions
+# test(application): add unit tests for error handling
+# chore(deps): upgrade NuGet packages to latest versions
+# ci(github): update workflow to use Node.js 20
+#
+# Types:
+# - feat:     A new feature
+# - fix:      A bug fix
+# - docs:     Documentation only changes
+# - style:    Formatting, missing semi colons, etc; no code change
+# - refactor: Refactoring production code
+# - test:     Adding tests, refactoring test; no production code change
+# - chore:    Updating build tasks, package manager configs, etc
+# - perf:     Performance improvements
+# - build:    Changes to build system or external dependencies
+# - ci:       Changes to CI configuration files and scripts
+# - revert:   Reverts a previous commit
+#
+# Scopes (examples for VolpexSystems.Shared):
+# - application: Core application patterns
+# - errors:      Error handling components
+# - results:     Result pattern implementations
+# - tests:       Test-related changes
+# - docs:        Documentation updates
+# - build:       Build system changes
+# - ci:          Continuous integration
+# - deps:        Dependency updates
+# - config:      Configuration changes
+# - github:      GitHub-specific files
+# - nuget:       NuGet package configuration
+# - scripts:     Build/automation scripts
+# - release:     Release management
+# - version:     Version bumping
+# - changelog:   Changelog updates
+#
+# Guidelines:
+# 1. Use imperative, present tense: "change" not "changed" nor "changes"
+# 2. Don't capitalize first letter of description
+# 3. No dot (.) at the end of description
+# 4. Keep description under 100 characters
+# 5. Include body for complex changes
+# 6. Reference issues in footer: "Fixes #123" or "Closes #456"
+# 7. Use "BREAKING CHANGE:" in footer for breaking changes
+#
+# Breaking Change Example:
+# feat(results)!: change ApplicationError severity enum values
+#
+# BREAKING CHANGE: ApplicationErrorSeverities enum values have changed.
+# Information is now 0 (was 1), Warning is now 1 (was 2), etc.
+# This affects all code that explicitly checks severity values.
+#
+# Fixes #123

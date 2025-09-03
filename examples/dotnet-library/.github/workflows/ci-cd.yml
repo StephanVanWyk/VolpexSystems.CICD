@@ -1,0 +1,66 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Build and test across multiple platforms and .NET versions
+  build-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        dotnet-version: ['6.0.x', '7.0.x', '8.0.x']
+    uses: VolpexSystems/CICD/.github/workflows/dotnet-build.yml@main
+    with:
+      dotnet-version: ${{ matrix.dotnet-version }}
+      os: ${{ matrix.os }}
+      solution-path: '**/*.sln'
+      run-tests: true
+      code-coverage: true
+      sonar-enabled: ${{ vars.ENABLE_SONAR == 'true' }}
+      sonar-project-key: ${{ vars.SONAR_PROJECT_KEY }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # Security scanning
+  security:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    uses: VolpexSystems/CICD/.github/workflows/security-scan.yml@main
+    with:
+      language: 'csharp'
+      enable-dependency-check: true
+      enable-secret-scanning: true
+      fail-on-high-severity: true
+
+  # Validate conventional commits
+  conventional-commits:
+    if: github.event_name == 'pull_request'
+    uses: VolpexSystems/CICD/.github/workflows/conventional-commits.yml@main
+
+  # Semantic versioning and release (main branch only)
+  release:
+    if: github.ref == 'refs/heads/main'
+    needs: [build-test, security]
+    uses: VolpexSystems/CICD/.github/workflows/semantic-version.yml@main
+    with:
+      project-path: 'src/**/*.csproj'
+      changelog-file: 'CHANGELOG.md'
+    secrets:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publish packages after successful release
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: [release]
+    uses: VolpexSystems/CICD/.github/workflows/nuget-publish.yml@main
+    with:
+      package-path: 'src/**/*.csproj'
+      configuration: 'Release'
+      include-symbols: true
+      github-packages: ${{ vars.ENABLE_GITHUB_PACKAGES == 'true' }}
+    secrets:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,295 @@
+name: Security Scanning
+
+on:
+  workflow_call:
+    inputs:
+      scan-code:
+        description: 'Enable static code analysis'
+        required: false
+        default: true
+        type: boolean
+      scan-dependencies:
+        description: 'Enable dependency vulnerability scanning'
+        required: false
+        default: true
+        type: boolean
+      scan-secrets:
+        description: 'Enable secret scanning'
+        required: false
+        default: true
+        type: boolean
+      scan-infrastructure:
+        description: 'Enable infrastructure as code scanning'
+        required: false
+        default: false
+        type: boolean
+      dotnet-version:
+        description: '.NET version for security analysis'
+        required: false
+        default: '8.0.x'
+        type: string
+      fail-on-severity:
+        description: 'Fail on security issues of this severity or higher'
+        required: false
+        default: 'high'
+        type: string
+      upload-sarif:
+        description: 'Upload SARIF results to GitHub Security tab'
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      SNYK_TOKEN:
+        description: 'Snyk token for vulnerability scanning'
+        required: false
+
+jobs:
+  codeql-analysis:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    if: ${{ inputs.scan-code }}
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: csharp
+        queries: security-extended,security-and-quality
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build solution
+      run: dotnet build --configuration Release --no-restore
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:csharp"
+        upload: ${{ inputs.upload-sarif }}
+
+  dependency-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    if: ${{ inputs.scan-dependencies }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
+    - name: Install dotnet-audit
+      run: dotnet tool install -g dotnet-audit
+
+    - name: Run .NET dependency audit
+      run: |
+        echo "## 🔍 .NET Dependency Audit" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        # Run audit and capture output
+        if dotnet audit; then
+          echo "✅ **No vulnerabilities found in .NET dependencies**" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ **Vulnerabilities detected in .NET dependencies**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please review the audit results and update affected packages." >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: OWASP Dependency Check
+      uses: dependency-check/Dependency-Check_Action@main
+      with:
+        project: '${{ github.repository }}'
+        path: '.'
+        format: 'ALL'
+        args: >
+          --enableRetired
+          --enableExperimental
+          --failOnCVSS 7
+          --out reports
+
+    - name: Upload OWASP Dependency Check results
+      if: ${{ inputs.upload-sarif }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: reports/dependency-check-report.sarif
+        category: dependency-check
+
+    - name: Upload dependency scan results
+      uses: actions/upload-artifact@v4
+      with:
+        name: dependency-scan-results
+        path: reports/
+        retention-days: 30
+
+    - name: Snyk vulnerability scan
+      if: ${{ secrets.SNYK_TOKEN }}
+      uses: snyk/actions/dotnet@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=${{ inputs.fail-on-severity }}
+        command: test
+
+    - name: Upload Snyk results to GitHub Code Scanning
+      if: ${{ secrets.SNYK_TOKEN && inputs.upload-sarif }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: snyk.sarif
+
+  secret-scan:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    if: ${{ inputs.scan-secrets }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: TruffleHog OSS
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: ${{ github.event.repository.default_branch }}
+        head: HEAD
+        extra_args: --debug --only-verified
+
+    - name: GitLeaks scan
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+    - name: Secret scan summary
+      if: always()
+      run: |
+        echo "## 🔐 Secret Scanning Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        if [[ "${{ job.status }}" == "success" ]]; then
+          echo "✅ **No secrets detected in repository**" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "⚠️ **Potential secrets detected**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please review the scan results and:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Remove any exposed secrets from the repository" >> $GITHUB_STEP_SUMMARY
+          echo "2. Rotate any compromised credentials" >> $GITHUB_STEP_SUMMARY
+          echo "3. Use GitHub Secrets or Azure Key Vault for sensitive data" >> $GITHUB_STEP_SUMMARY
+        fi
+
+  infrastructure-scan:
+    name: Infrastructure as Code Scan
+    runs-on: ubuntu-latest
+    if: ${{ inputs.scan-infrastructure }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Checkov scan
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: .
+        framework: terraform,arm,cloudformation,kubernetes,dockerfile
+        output_format: sarif
+        output_file_path: reports/checkov.sarif
+        soft_fail: true
+
+    - name: Upload Checkov scan results
+      if: ${{ inputs.upload-sarif }}
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: reports/checkov.sarif
+        category: checkov
+
+    - name: Terraform security scan
+      if: ${{ hashFiles('**/*.tf') != '' }}
+      uses: aquasecurity/tfsec-action@v1.0.0
+      with:
+        soft_fail: true
+
+    - name: Upload infrastructure scan results
+      uses: actions/upload-artifact@v4
+      with:
+        name: infrastructure-scan-results
+        path: reports/
+        retention-days: 30
+
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [codeql-analysis, dependency-scan, secret-scan, infrastructure-scan]
+    if: always()
+
+    steps:
+    - name: Create security summary
+      run: |
+        echo "## 🛡️ Security Scanning Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        # CodeQL Analysis
+        if [[ "${{ inputs.scan-code }}" == "true" ]]; then
+          if [[ "${{ needs.codeql-analysis.result }}" == "success" ]]; then
+            echo "✅ **Static Code Analysis** - No security issues found" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.codeql-analysis.result }}" == "failure" ]]; then
+            echo "❌ **Static Code Analysis** - Security issues detected" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⏭️ **Static Code Analysis** - Skipped or cancelled" >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
+
+        # Dependency Scan
+        if [[ "${{ inputs.scan-dependencies }}" == "true" ]]; then
+          if [[ "${{ needs.dependency-scan.result }}" == "success" ]]; then
+            echo "✅ **Dependency Vulnerability Scan** - No vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.dependency-scan.result }}" == "failure" ]]; then
+            echo "❌ **Dependency Vulnerability Scan** - Vulnerabilities detected" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⏭️ **Dependency Vulnerability Scan** - Skipped or cancelled" >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
+
+        # Secret Scan
+        if [[ "${{ inputs.scan-secrets }}" == "true" ]]; then
+          if [[ "${{ needs.secret-scan.result }}" == "success" ]]; then
+            echo "✅ **Secret Scanning** - No secrets detected" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.secret-scan.result }}" == "failure" ]]; then
+            echo "❌ **Secret Scanning** - Potential secrets detected" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⏭️ **Secret Scanning** - Skipped or cancelled" >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
+
+        # Infrastructure Scan
+        if [[ "${{ inputs.scan-infrastructure }}" == "true" ]]; then
+          if [[ "${{ needs.infrastructure-scan.result }}" == "success" ]]; then
+            echo "✅ **Infrastructure Scanning** - No issues found" >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ needs.infrastructure-scan.result }}" == "failure" ]]; then
+            echo "❌ **Infrastructure Scanning** - Security issues detected" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⏭️ **Infrastructure Scanning** - Skipped or cancelled" >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
+
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- **Fail on severity:** ${{ inputs.fail-on-severity }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Upload SARIF:** ${{ inputs.upload-sarif }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Scans enabled:** Code: ${{ inputs.scan-code }}, Dependencies: ${{ inputs.scan-dependencies }}, Secrets: ${{ inputs.scan-secrets }}, Infrastructure: ${{ inputs.scan-infrastructure }}" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,189 @@
+name: Semantic Version & Release
+
+on:
+  workflow_call:
+    inputs:
+      release-branches:
+        description: 'Branches that trigger releases (comma-separated)'
+        required: false
+        default: 'main,master'
+        type: string
+      pre-release-branches:
+        description: 'Branches that trigger pre-releases (comma-separated)'
+        required: false
+        default: 'develop,beta'
+        type: string
+      tag-prefix:
+        description: 'Prefix for version tags'
+        required: false
+        default: 'v'
+        type: string
+      dry-run:
+        description: 'Perform a dry run without creating releases'
+        required: false
+        default: false
+        type: boolean
+      package-manager:
+        description: 'Package manager for version updates'
+        required: false
+        default: 'dotnet'
+        type: string
+    outputs:
+      version:
+        description: 'The generated semantic version'
+        value: ${{ jobs.semantic-version.outputs.version }}
+      released:
+        description: 'Whether a release was created'
+        value: ${{ jobs.semantic-version.outputs.released }}
+      release-notes:
+        description: 'Generated release notes'
+        value: ${{ jobs.semantic-version.outputs.release-notes }}
+
+jobs:
+  semantic-version:
+    name: Semantic Version & Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semantic.outputs.new_release_version }}
+      released: ${{ steps.semantic.outputs.new_release_published }}
+      release-notes: ${{ steps.semantic.outputs.new_release_notes }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install semantic-release
+      run: |
+        npm install -g semantic-release
+        npm install -g @semantic-release/changelog
+        npm install -g @semantic-release/git
+        npm install -g @semantic-release/github
+        npm install -g @semantic-release/exec
+
+    - name: Create semantic-release config
+      run: |
+        cat > .releaserc.json << 'EOF'
+        {
+          "branches": [
+            "+([0-9])?(.{+([0-9]),x}).x",
+            "main",
+            "master",
+            {
+              "name": "develop",
+              "prerelease": "beta"
+            },
+            {
+              "name": "beta",
+              "prerelease": true
+            }
+          ],
+          "plugins": [
+            "@semantic-release/commit-analyzer",
+            "@semantic-release/release-notes-generator",
+            [
+              "@semantic-release/changelog",
+              {
+                "changelogFile": "CHANGELOG.md"
+              }
+            ],
+            [
+              "@semantic-release/exec",
+              {
+                "prepareCmd": "echo 'Version: ${nextRelease.version}' > version.txt"
+              }
+            ],
+            [
+              "@semantic-release/github",
+              {
+                "assets": [
+                  {
+                    "path": "version.txt",
+                    "label": "Version info"
+                  }
+                ]
+              }
+            ],
+            [
+              "@semantic-release/git",
+              {
+                "assets": ["CHANGELOG.md"],
+                "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+              }
+            ]
+          ]
+        }
+        EOF
+
+    - name: Semantic Release
+      id: semantic
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        if [[ "${{ inputs.dry-run }}" == "true" ]]; then
+          npx semantic-release --dry-run
+        else
+          npx semantic-release
+        fi
+
+    - name: Update .NET project versions
+      if: ${{ steps.semantic.outputs.new_release_published == 'true' && inputs.package-manager == 'dotnet' }}
+      run: |
+        VERSION=${{ steps.semantic.outputs.new_release_version }}
+        echo "Updating .NET projects to version: $VERSION"
+
+        # Find all .csproj files and update version
+        find . -name "*.csproj" -type f | while read -r file; do
+          echo "Updating version in: $file"
+
+          # Update or add Version property
+          if grep -q "<Version>" "$file"; then
+            sed -i "s|<Version>.*</Version>|<Version>$VERSION</Version>|g" "$file"
+          else
+            # Add Version property after first PropertyGroup
+            sed -i "/<PropertyGroup>/a\\    <Version>$VERSION</Version>" "$file"
+          fi
+
+          # Update or add AssemblyVersion
+          if grep -q "<AssemblyVersion>" "$file"; then
+            sed -i "s|<AssemblyVersion>.*</AssemblyVersion>|<AssemblyVersion>$VERSION</AssemblyVersion>|g" "$file"
+          else
+            sed -i "/<PropertyGroup>/a\\    <AssemblyVersion>$VERSION</AssemblyVersion>" "$file"
+          fi
+
+          # Update or add FileVersion
+          if grep -q "<FileVersion>" "$file"; then
+            sed -i "s|<FileVersion>.*</FileVersion>|<FileVersion>$VERSION</FileVersion>|g" "$file"
+          else
+            sed -i "/<PropertyGroup>/a\\    <FileVersion>$VERSION</FileVersion>" "$file"
+          fi
+        done
+
+    - name: Create version summary
+      if: ${{ steps.semantic.outputs.new_release_published == 'true' }}
+      run: |
+        echo "## 🎉 New Release Created" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** ${{ steps.semantic.outputs.new_release_version }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Tag:** ${{ inputs.tag-prefix }}${{ steps.semantic.outputs.new_release_version }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Release Notes" >> $GITHUB_STEP_SUMMARY
+        echo "${{ steps.semantic.outputs.new_release_notes }}" >> $GITHUB_STEP_SUMMARY
+
+    - name: No release summary
+      if: ${{ steps.semantic.outputs.new_release_published != 'true' }}
+      run: |
+        echo "## ℹ️ No Release Created" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "No new release was created. This may be because:" >> $GITHUB_STEP_SUMMARY
+        echo "- No commits since last release meet the criteria" >> $GITHUB_STEP_SUMMARY
+        echo "- Branch is not configured for releases" >> $GITHUB_STEP_SUMMARY
+        echo "- This is a dry run" >> $GITHUB_STEP_SUMMARY

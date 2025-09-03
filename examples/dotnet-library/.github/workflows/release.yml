@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  # Build release packages
+  build:
+    uses: VolpexSystems/CICD/.github/workflows/dotnet-build.yml@main
+    with:
+      dotnet-version: '8.0.x'
+      configuration: 'Release'
+      solution-path: '**/*.sln'
+      run-tests: true
+      code-coverage: false
+
+  # Publish to all configured registries
+  publish:
+    needs: build
+    uses: VolpexSystems/CICD/.github/workflows/nuget-publish.yml@main
+    with:
+      package-path: 'src/**/*.csproj'
+      configuration: 'Release'
+      include-symbols: true
+      github-packages: true
+      prerelease: ${{ github.event.release.prerelease }}
+    secrets:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
